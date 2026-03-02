@@ -1,0 +1,56 @@
+version: '3.8'
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+    networks:
+      - mcp-network
+    command: serve
+
+  mcp-server:
+    build: ./server
+    container_name: mcp-server
+    environment:
+      - OPENWEATHER_API_KEY=
+      - USE_MOCK=true
+    volumes:
+      - ./logs:/logs
+    networks:
+      - mcp-network
+    # Сервер будет запускаться клиентом, поэтому не нужен как отдельный сервис
+    # Оставляем для возможности отдельного запуска
+    command: ["python", "mcp_client.py.py"]
+    stdin_open: true
+    tty: true
+
+  mcp-client:
+    build: ./client
+    container_name: mcp-client
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+      - OLLAMA_MODEL=qwen2.5:7b
+    volumes:
+      - ./logs:/logs
+    networks:
+      - mcp-network
+    stdin_open: true
+    tty: true
+    depends_on:
+      - ollama
+      - mcp-server
+    # Переопределяем команду для интерактивного режима
+    command: ["python", "-u", "mcp_client.py"]
+
+networks:
+  mcp-network:
+    driver: bridge
+
+volumes:
+  ollama_data:
