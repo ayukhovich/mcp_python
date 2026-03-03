@@ -10,18 +10,17 @@ import datetime
 import json  # Для работы с JSON (парсинг ответов LLM)
 import logging  # Для логирования работы клиента
 import os  # Для работы с файловой системой (создание директорий)
-import sys  # Для доступа к системным параметрам (stdout)
 import re  # Для регулярных выражений (извлечение JSON из ответа)
+import sys  # Для доступа к системным параметрам (stdout)
 
-# Сторонние библиотеки
-from colorama import init, Fore, Style  # Для цветного вывода в консоль (Windows совместимость)
-from openai import OpenAI  # Клиент для работы с Ollama (совместимый с OpenAI API)
-from dotenv import load_dotenv  # Для загрузки переменных окружения из .env файла
 import httpx  # HTTP клиент (используется для патчинга запросов)
-
+# Сторонние библиотеки
+from colorama import init, Fore  # Для цветного вывода в консоль (Windows совместимость)
+from dotenv import load_dotenv  # Для загрузки переменных окружения из .env файла
 # MCP библиотеки
 from mcp import ClientSession  # Основной класс для работы с MCP сессией
 from mcp.client.sse import sse_client  # Клиент для SSE подключения к серверу
+from openai import OpenAI  # Клиент для работы с Ollama (совместимый с OpenAI API)
 
 # Инициализация colorama для корректного отображения цветов в Windows
 # autoreset=True автоматически сбрасывает цвет после каждого print
@@ -423,9 +422,17 @@ async def main(query: str):
 Tool results:
 {tool_response}
 
-Provide a friendly response combining all information."""
+Provide a friendly response. Respond with ONLY JSON: {{"response": "your answer"}}"""
                     final_response = llm_client(final_prompt)
-                    final_answer = final_response
+                    # Очищаем от markdown
+                    clean = final_response.strip()
+                    if clean.startswith("```"):
+                        clean = clean.strip("`").split("\n", 1)[1] if "\n" in clean else clean.strip("`")
+                    try:
+                        final_data = json.loads(clean)
+                        final_answer = final_data.get("response", clean)
+                    except:
+                        final_answer = clean
                 else:
                     final_answer = tool_response
 
