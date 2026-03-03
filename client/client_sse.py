@@ -142,39 +142,56 @@ def llm_client(message: str) -> str:
 
 
 def get_prompt_to_identify_tool_and_arguments(query: str, tools) -> str:
-    """
-    Формирует промпт для LLM, который описывает доступные инструменты
-    и просит выбрать подходящий для ответа на вопрос пользователя.
-
-    Аргументы:
-        query (str): вопрос пользователя
-        tools: объект с описанием доступных инструментов от MCP сервера
-
-    Возвращает:
-        str: сформированный промпт для отправки в LLM
-    """
-    # Формируем описание каждого инструмента: имя, описание, схема входных данных
+    tool_list = list(tools.tools)
+    
     tools_description = "\n".join([
-        f"{tool.name}: {tool.description}, Input schema: {tool.inputSchema}"
-        for tool in tools.tools
+        f"{tool.name}: {tool.description}, Input schema: {json.dumps(tool.inputSchema)}"
+        for tool in tool_list
     ])
 
-    # Возвращаем многострочный промпт с четкими инструкциями
+    # Формируем примеры динамически на основе ВСЕХ инструментов
+    single_examples = []
+    multiple_examples = []
+    
+    for tool in tool_list:
+        args = {}
+        if tool.inputSchema:
+            props = tool.inputSchema.get('properties', {})
+            for prop_name, prop_info in props.items():
+                prop_type = prop_info.get('type', 'string')
+                if prop_type == 'integer':
+                    args[prop_name] = 1
+                elif prop_type == 'boolean':
+                    args[prop_name] = True
+                else:
+                    args[prop_name] = f"<{prop_name}>"
+        
+        if args:
+            example = {"tool": tool.name, "arguments": args}
+            single_examples.append(example)
+            if len(multiple_examples) < 2:
+                multiple_examples.append(example)
+
+    # Формируем финальные примеры
+    if single_examples:
+        example_single = json.dumps(single_examples[0])
+        example_multiple = json.dumps(multiple_examples[:2]) if len(multiple_examples) >= 2 else example_single
+    else:
+        example_single = '{"tool": "tool_name", "arguments": {}}'
+        example_multiple = example_single
+
     return (
         "You are a helpful assistant with access to these tools:\n\n"
-        f"{tools_description}\n"
-        "Choose the appropriate tool based on the user's question.\n"
-        f"User's Question: {query}\n"
-        "If no tool is needed, reply directly with a helpful response.\n\n"
-        "IMPORTANT: When you need to use a tool, you must ONLY respond with "
-        "the exact JSON object format below, nothing else - no explanations, no markdown:\n"
-        "EXAMPLE RESPONSE:\n"
-        '{\n'
-        '    "tool": "time_tool",\n'
-        '    "arguments": {\n'
-        '        "input_timezone": "Asia/Kolkata"\n'
-        '    }\n'
-        '}\n\n'
+        f"{tools_description}\n\n"
+        f"User question: {query}\n\n"
+        "RULES:\n"
+        "- You MUST use tools to get factual information (time, weather, etc.)\n"
+        "- NEVER answer directly - always use tools\n"
+        "- If question needs multiple facts, use JSON array with ALL needed tools\n"
+        "- Return ONLY JSON, no explanations\n\n"
+        f"Example (multiple tools):\n{example_multiple}\n\n"
+        f"Example (single tool):\n{example_single}\n\n"
+        "Response:"
     )
 
 
@@ -354,67 +371,76 @@ async def main(query: str):
 
             # 7) Пытаемся распарсить ответ как JSON
             try:
-                # Используем регулярное выражение для поиска JSON в ответе
-                # Это на случай, если модель добавила пояснения до или после JSON
-                # re.DOTALL позволяет точке соответствовать также символам новой строки
-                json_match = re.search(r'\{.*\}', response, re.DOTALL)
+                json_match = re.search(r'(\[[\s\S]*\]|\{[\s\S]*\})', response)
 
                 if json_match:
-                    # Извлекаем найденный JSON как строку
                     json_str = json_match.group()
-                    logger.info(f"{Fore.YELLOW}🔍 Extracted JSON: {json_str}")
-                    # Парсим строку в Python объект (словарь)
-                    tool_call = json.loads(json_str)
+                    logger.info(f"Extracted JSON: {json_str}")
+                    tool_calls = json.loads(json_str)
                 else:
-                    # Если JSON не найден, пробуем распарсить весь ответ
-                    # Это вызовет JSONDecodeError если ответ не является валидным JSON
-                    tool_call = json.loads(response)
+                    tool_calls = json.loads(response)
 
-                # Логируем успешно распарсенный вызов инструмента
-                logger.info(f"{Fore.GREEN}✅ Successfully parsed tool call:")
-                logger.info(f"{Fore.GREEN}  🛠️ Tool: {tool_call['tool']}")
-                logger.info(f"{Fore.GREEN}  📊 Arguments: {tool_call['arguments']}")
-                logger.info(f"{Fore.GREEN}{'=' * 40}")
-
-                # 8) Вызываем выбранный инструмент на MCP сервере
-                # Передаем имя инструмента и аргументы
-                logger.info(f"{Fore.YELLOW}🔄 Calling tool '{tool_call['tool']}' on MCP server...")
-                result = await session.call_tool(tool_call["tool"], arguments=tool_call["arguments"])
-
-                # 9) Извлекаем текст ответа из результата
-                # Структура result может быть разной, поэтому делаем проверки
-                if hasattr(result, 'content') and result.content:
-                    # Проверяем есть ли атрибут text у первого элемента content
-                    if hasattr(result.content[0], 'text'):
-                        tool_response = result.content[0].text
+                # Обрабатываем случай когда LLM вернул {"response": "..."}
+                if isinstance(tool_calls, dict):
+                    if "response" in tool_calls:
+                        print(f"\n{'=' * 40}")
+                        print(f"Result: {tool_calls['response']}")
+                        print(f"{'=' * 40}\n")
+                    elif "tool" in tool_calls and "arguments" in tool_calls:
+                        tool_calls = [tool_calls]
                     else:
-                        # Если нет text, преобразуем весь объект в строку
-                        tool_response = str(result.content[0])
+                        raise ValueError("Invalid tool call format")
+                elif isinstance(tool_calls, list):
+                    valid_calls = [tc for tc in tool_calls if isinstance(tc, dict) and "tool" in tc and "arguments" in tc]
+                    if not valid_calls:
+                        raise ValueError("No valid tool calls found")
+                    tool_calls = valid_calls
                 else:
-                    # Если нет content, преобразуем весь result в строку
-                    tool_response = str(result)
+                    raise ValueError("Invalid tool call format")
 
-                # Логируем успешное выполнение
-                logger.success(f"{Fore.GREEN}✨ User query: {query}")
-                logger.success(f"{Fore.GREEN}✨ Tool Response: {tool_response}")
+                # Вызываем все инструменты
+                results = []
+                for tool_call in tool_calls:
+                    logger.info(f"Calling tool: {tool_call['tool']}")
+                    result = await session.call_tool(tool_call["tool"], arguments=tool_call["arguments"])
 
-                # Выводим результат пользователю
-                print(f"\n{Fore.GREEN}{'⭐' * 30}")
-                print(f"{Fore.GREEN}Result: {tool_response}")
-                print(f"{Fore.GREEN}{'⭐' * 30}\n")
+                    if hasattr(result, 'content') and result.content:
+                        if hasattr(result.content[0], 'text'):
+                            tool_response = result.content[0].text
+                        else:
+                            tool_response = str(result.content[0])
+                    else:
+                        tool_response = str(result)
 
-            except json.JSONDecodeError as e:
-                # Ошибка парсинга JSON - модель вернула невалидный JSON
-                logger.error(f"{Fore.RED}❌ JSONDecodeError: Failed to parse LLM response: {e}")
-                logger.error(f"{Fore.RED}  Raw response was: {response}")
-                print(f"\n{Fore.RED}Error: Could not parse LLM response as JSON. Response was: {response}\n")
+                    results.append(f"{tool_call['tool']}: {tool_response}")
 
-            except KeyError as e:
-                # Ошибка отсутствия ключа - JSON не содержит ожидаемых полей 'tool' или 'arguments'
-                logger.error(f"{Fore.RED}❌ KeyError: Missing expected key in tool call: {e}")
-                logger.error(
-                    f"{Fore.RED}  Tool call structure: {tool_call if 'tool_call' in locals() else 'Not parsed'}")
-                print(f"\n{Fore.RED}Error: Invalid tool call structure. Missing key: {e}\n")
+                tool_response = "\n".join(results)
+
+                # Если несколько инструментов - отправляем в LLM для красивого ответа
+                if len(results) > 1:
+                    final_prompt = f"""User question: {query}
+
+Tool results:
+{tool_response}
+
+Provide a friendly response combining all information."""
+                    final_response = llm_client(final_prompt)
+                    final_answer = final_response
+                else:
+                    final_answer = tool_response
+
+                print(f"\n{'=' * 40}")
+                print(f"Result: {final_answer}")
+                print(f"{'=' * 40}\n")
+
+            except json.JSONDecodeError:
+                # LLM вернул текст напрямую
+                clean_response = response.strip()
+                if clean_response.startswith("```"):
+                    clean_response = clean_response.strip("`").split("\n", 1)[1] if "\n" in clean_response else clean_response.strip("`")
+                print(f"\n{'=' * 40}")
+                print(f"Result: {clean_response}")
+                print(f"{'=' * 40}\n")
 
             except Exception as e:
                 # Любая другая непредвиденная ошибка
@@ -429,8 +455,9 @@ if __name__ == "__main__":
     """
     # Список тестовых запросов
     queries = [
-        "What is the time in Bengaluru?",  # Запрос времени
-        "What is the weather like right now in Dubai?"  # Запрос погоды
+#        "What is the time in Bengaluru?",  # Запрос времени
+#        "What is the weather like right now in Dubai?",  # Запрос погоды
+        "Сколько сейчас времени в Риге и какая погода в Риге?"
     ]
 
     # Визуальное начало работы

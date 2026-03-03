@@ -70,7 +70,7 @@ if __name__ == "__main__":
     try:
         logger.info(f"🚀 Starting MCP Server on {HOST}:{PORT}")
         logger.info(f"📋 Available tools: time_tool, weather_tool")
-        
+
         if TRANSPORT == "sse":
             app = mcp.sse_app()
             starlette_app = Starlette(
@@ -88,7 +88,7 @@ if __name__ == "__main__":
             uvicorn.run(starlette_app, host=HOST, port=PORT)
         else:
             mcp.run(transport=TRANSPORT, host=HOST, port=PORT)
-            
+
     except KeyboardInterrupt:
         logger.info("👋 Server stopped by user")
         sys.exit(0)
